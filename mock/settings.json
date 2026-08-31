@@ -1,0 +1,9 @@
+{
+  "oaicopilot.models": [
+    {
+      "id": "Qwen3.8-27B",
+      "displayName": "Qwen3.8 27B",
+      "baseUrl": "http://127.0.0.1:9444/v1"
+    }
+  ]
+}
