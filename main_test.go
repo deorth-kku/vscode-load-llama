@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -27,9 +30,16 @@ func TestProcessEvent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	settings := &config.Settings{Models: map[string]config.Model{
-		"Qwen3.8 27B": {ID: "Qwen3.8-27B", BaseURL: srv.URL + "/v1"},
-	}}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "settings.json")
+	content := fmt.Sprintf(`{"oaicopilot.models":[{"id":"Qwen3.8-27B","displayName":"Qwen3.8 27B","baseUrl":"%s/v1"}]}`, srv.URL)
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := config.NewStore(p, discardLog)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ld := loader.New(30*time.Second, discardLog, nil)
 	log := discardLog
 

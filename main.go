@@ -53,17 +53,25 @@ func run(cdpAddr, settingsPath string, cooldown time.Duration, logPath string, v
 	log := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(log)
 
-	// settings.json is loaded once at startup (no hot reload).
-	settings, err := config.Load(settingsPath)
+	// settings.json is loaded once up front, then hot-reloaded via fsnotify.
+	// The current snapshot lives in an atomic pointer inside the Store, so
+	// readers never take a lock.
+	store, err := config.NewStore(settingsPath, log)
 	if err != nil {
 		return fmt.Errorf("load settings: %w", err)
 	}
-	log.Info("settings loaded", "path", settingsPath, "models", len(settings.Models))
+	log.Info("settings loaded", "path", settingsPath, "models", len(store.Load().Models))
 
 	ctx, stop := signal.NotifyContext(context.Background(), signals...)
 	defer stop()
+	if err := store.Watch(ctx); err != nil {
+		// Non-fatal: keep monitoring with the initial snapshot.
+		log.Error("start settings watcher", "err", err)
+	}
 
-	ld := loader.New(cooldown, log, settings.ProxyFunc())
+	// The loader resolves the proxy per-request from the current atomic
+	// snapshot, so http.proxy / http.noProxy changes hot-reload too.
+	ld := loader.New(cooldown, log, store.ProxyFunc)
 	events := make(chan cdp.Event, 256)
 	disc := cdp.NewDiscovery(cdpAddr, events, log)
 	go disc.Run(ctx)
@@ -76,7 +84,7 @@ func run(cdpAddr, settingsPath string, cooldown time.Duration, logPath string, v
 			log.Info("shutting down")
 			return nil
 		case ev := <-events:
-			processEvent(ev, settings, ld, log)
+			processEvent(ev, store, ld, log)
 		}
 	}
 }
@@ -84,7 +92,7 @@ func run(cdpAddr, settingsPath string, cooldown time.Duration, logPath string, v
 // processEvent handles one chat input event: skip empty input / missing
 // model, look the model up in the settings table, then request a load
 // (cooldown-gated inside the loader).
-func processEvent(ev cdp.Event, settings *config.Settings, ld *loader.Loader, log *slog.Logger) {
+func processEvent(ev cdp.Event, store *config.Store, ld *loader.Loader, log *slog.Logger) {
 	// Monaco inserts nbsp; normalize before the emptiness check.
 	input := strings.TrimSpace(strings.ReplaceAll(ev.Input, "\u00a0", " "))
 	if input == "" {
@@ -95,7 +103,8 @@ func processEvent(ev cdp.Event, settings *config.Settings, ld *loader.Loader, lo
 		log.Debug("skip: no model", "window", ev.Window)
 		return
 	}
-	m, ok := settings.Models[ev.Model]
+	// Atomic read of the current settings snapshot (no lock).
+	m, ok := store.Load().Models[ev.Model]
 	if !ok {
 		log.Warn("model not found in settings, skip", "model", ev.Model, "window", ev.Window)
 		return

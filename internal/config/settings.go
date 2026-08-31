@@ -1,6 +1,7 @@
-// Package config loads the VS Code settings.json once at startup and
-// builds the model lookup table used to map a displayed model name to
-// its id + baseUrl.
+// Package config loads the VS Code settings.json and builds the model
+// lookup table used to map a displayed model name to its id + baseUrl.
+// The Store wrapper (watch.go) hot-reloads the file via fsnotify and
+// publishes each snapshot through an atomic pointer.
 package config
 
 import (
