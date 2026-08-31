@@ -93,7 +93,7 @@ func (d *Discovery) scan(ctx context.Context) {
 	for id, t := range current {
 		s, ok := d.sessions[id]
 		if ok && !s.IsDone() {
-			s.Title = t.Title
+			s.SetTitle(t.Title)
 			continue
 		}
 		if ok {
@@ -107,7 +107,7 @@ func (d *Discovery) scan(ctx context.Context) {
 	for id, s := range d.sessions {
 		if _, ok := current[id]; !ok {
 			s.Stop()
-			d.log.Info("window closed", "title", s.Title)
+			d.log.Info("window closed", "title", s.Title())
 			delete(d.sessions, id)
 		}
 	}

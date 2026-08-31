@@ -152,3 +152,65 @@ func TestSessionDialFailureDoesNotPanic(t *testing.T) {
 		t.Fatal("run did not return after dial failure")
 	}
 }
+
+// startControlledPage simulates a workbench page whose binding payloads
+// the test can push on demand (unlike startMockPage, which is scripted
+// by Runtime.evaluate).
+func startControlledPage(t *testing.T) (wsURL string, push chan string) {
+	t.Helper()
+	push = make(chan string, 16)
+	t.Cleanup(func() { close(push) })
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// NOTE: no connect handshake here — the client only dials after
+		// this function returns the URL, so waiting for a connection
+		// would deadlock. The buffered push channel decouples timing.
+		go func() {
+			for p := range push {
+				c.WriteJSON(map[string]any{
+					"method": "Runtime.bindingCalled",
+					"params": map[string]any{"name": BindingName, "payload": p},
+				})
+			}
+		}()
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return "ws" + strings.TrimPrefix(srv.URL, "http"), push
+}
+
+// TestSessionTitleUpdateVisibleInEvents verifies that a title change
+// (SetTitle, driven by the discovery scan) is reflected in the Window
+// field of subsequent events, race-free (run with -race).
+func TestSessionTitleUpdateVisibleInEvents(t *testing.T) {
+	wsURL, push := startControlledPage(t)
+	events := make(chan Event, 10)
+	s := NewSession("id", "Original", wsURL, events, discardLog)
+	go s.Run(context.Background())
+	defer s.Stop()
+
+	push <- `{"input":"a","model":"M"}`
+	ev := readEvent(t, events)
+	if ev.Window != "Original" {
+		t.Fatalf("expected Window %q, got %q", "Original", ev.Window)
+	}
+
+	s.SetTitle("Renamed")
+	if got := s.Title(); got != "Renamed" {
+		t.Fatalf("Title() = %q, want %q", got, "Renamed")
+	}
+
+	push <- `{"input":"b","model":"M"}`
+	ev = readEvent(t, events)
+	if ev.Window != "Renamed" {
+		t.Fatalf("expected Window %q after SetTitle, got %q", "Renamed", ev.Window)
+	}
+}

@@ -43,8 +43,11 @@ func strp(p *string) string {
 // session owns its own WebSocket so Runtime.addBinding globals never
 // clash between windows.
 type Session struct {
-	ID    string
-	Title string
+	ID string
+	// title is atomically updated by the discovery scan (VS Code can
+	// change a window's title at any time) and read lock-free from the
+	// session goroutine (Event.Window) and from log lines.
+	title atomic.Pointer[string]
 	WSURL string
 
 	events chan Event
@@ -53,22 +56,32 @@ type Session struct {
 	mu   sync.Mutex
 	conn *websocket.Conn
 
-	done   atomic.Bool
-	doneCh chan struct{}
-	last   string // dedupe: last payload JSON already emitted
-	n      int
+	done atomic.Bool
+	last string // dedupe: last payload JSON already emitted
+	n    int
 }
 
 func NewSession(id, title, wsURL string, events chan Event, log *slog.Logger) *Session {
-	return &Session{
+	s := &Session{
 		ID:     id,
-		Title:  title,
 		WSURL:  wsURL,
 		events: events,
 		log:    log,
-		doneCh: make(chan struct{}),
 	}
+	s.title.Store(&title)
+	return s
 }
+
+// Title returns the current window title.
+func (s *Session) Title() string {
+	if p := s.title.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// SetTitle atomically updates the window title (discovery scan).
+func (s *Session) SetTitle(t string) { s.title.Store(&t) }
 
 // IsDone reports whether the session's run loop has exited.
 func (s *Session) IsDone() bool { return s.done.Load() }
@@ -85,7 +98,6 @@ func (s *Session) Stop() {
 // Run dials the page WebSocket and processes messages until the
 // connection drops or the session is stopped. It never panics.
 func (s *Session) Run(ctx context.Context) {
-	defer close(s.doneCh)
 	defer s.done.Store(true)
 
 	// gorilla does not send an Origin header, which is required
@@ -93,7 +105,7 @@ func (s *Session) Run(ctx context.Context) {
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
 	conn, _, err := dialer.Dial(s.WSURL, nil)
 	if err != nil {
-		s.log.Debug("dial failed", "window", s.Title, "err", err)
+		s.log.Debug("dial failed", "window", s.Title(), "err", err)
 		return
 	}
 	s.mu.Lock()
@@ -101,7 +113,7 @@ func (s *Session) Run(ctx context.Context) {
 	s.mu.Unlock()
 	defer conn.Close()
 
-	s.log.Info("attached window", "title", s.Title)
+	s.log.Info("attached window", "title", s.Title())
 	s.send("Runtime.enable", nil)
 	s.send("Page.enable", nil)
 	s.send("Runtime.addBinding", map[string]any{"name": BindingName})
@@ -116,7 +128,7 @@ func (s *Session) Run(ctx context.Context) {
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			s.log.Debug("read loop ended", "window", s.Title, "err", err)
+			s.log.Debug("read loop ended", "window", s.Title(), "err", err)
 			return
 		}
 		s.handle(raw)
@@ -155,7 +167,7 @@ func (s *Session) handle(raw []byte) {
 				continue
 			}
 			ev := Event{
-				Window: s.Title,
+				Window: s.Title(),
 				Input:  strp(st.Input),
 				Model:  strp(st.Model),
 				Effort: strp(st.Effort),
@@ -164,11 +176,11 @@ func (s *Session) handle(raw []byte) {
 			select {
 			case s.events <- ev:
 			default:
-				s.log.Warn("event channel full, dropping", "window", s.Title)
+				s.log.Warn("event channel full, dropping", "window", s.Title())
 			}
 		case "Page.frameNavigated":
 			// workbench reload: the binding is gone, reinstall
-			s.log.Info("frame navigated, re-injecting", "window", s.Title)
+			s.log.Info("frame navigated, re-injecting", "window", s.Title())
 			s.send("Runtime.addBinding", map[string]any{"name": BindingName})
 			s.send("Runtime.evaluate", map[string]any{"expression": InjectJS, "returnByValue": true})
 		}

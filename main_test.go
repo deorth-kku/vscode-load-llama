@@ -51,12 +51,32 @@ func TestProcessEvent(t *testing.T) {
 
 	// real input -> exactly one load, at the SERVER ROOT, with the model id
 	processEvent(cdp.Event{Window: "w", Input: "hello", Model: "Qwen3.8 27B"}, settings, ld, log)
+	waitForReqs(t, &mu, &reqs, 1)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(reqs) != 1 {
-		t.Fatalf("expected 1 load request, got %d: %v", len(reqs), reqs)
+		t.Fatalf("expected 1 load request, got %d", len(reqs))
 	}
 	if reqs[0] != `/models/load {"model":"Qwen3.8-27B"}` {
 		t.Errorf("unexpected request: %s", reqs[0])
+	}
+}
+
+// waitForReqs polls until the server has seen at least n requests.
+// Needed because processEvent dispatches Load in a goroutine.
+func waitForReqs(t *testing.T, mu *sync.Mutex, reqs *[]string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		got := len(*reqs)
+		mu.Unlock()
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for %d load requests, got %d", n, got)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

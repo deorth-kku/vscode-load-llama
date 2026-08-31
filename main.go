@@ -102,7 +102,11 @@ func processEvent(ev cdp.Event, settings *config.Settings, ld *loader.Loader, lo
 	}
 	log.Info("input event", "window", ev.Window, "model", ev.Model,
 		"effort", ev.Effort, "mode", ev.Mode, "inputLen", len(input))
-	ld.Load(m)
+	// Async: Load does a blocking HTTP POST (up to the client timeout).
+	// A goroutine keeps the event loop responsive for all windows; the
+	// mutex-gated cooldown inside the loader still dedupes concurrent
+	// requests per model.
+	go ld.Load(m)
 }
 
 // defaultSettingsPath returns the VS Code user settings.json location for
