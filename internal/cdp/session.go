@@ -2,7 +2,8 @@ package cdp
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -21,8 +22,8 @@ type Event struct {
 }
 
 type cdpMessage struct {
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params"`
+	Method string         `json:"method"`
+	Params jsontext.Value `json:"params"`
 }
 
 type pageState struct {

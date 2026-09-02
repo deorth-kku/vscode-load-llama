@@ -4,12 +4,11 @@ package loader
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -60,18 +59,15 @@ func (l *Loader) Load(m config.Model) {
 	loadURL := root + "/models/load"
 
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	if _, ok := l.nonLlama[root]; ok {
-		l.mu.Unlock()
 		l.log.Debug("skip: not a llama.cpp endpoint", "model", m.ID, "url", root)
 		return
 	}
 	if last, ok := l.last[m.ID]; ok && time.Since(last) < l.cooldown {
-		l.mu.Unlock()
 		l.log.Debug("cooldown active, skip", "model", m.ID)
 		return
 	}
-	l.last[m.ID] = time.Now()
-	l.mu.Unlock()
 
 	body, _ := json.Marshal(map[string]string{"model": m.ID})
 	req, err := http.NewRequest(http.MethodPost, loadURL, bytes.NewReader(body))
@@ -88,29 +84,58 @@ func (l *Loader) Load(m config.Model) {
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	l.classify(m, root, loadURL, resp.StatusCode, b)
+	loaded := l.classify(m, root, loadURL, resp.StatusCode, b)
+	if loaded {
+		l.last[m.ID] = time.Now()
+	}
+}
+
+// loadResponse is the exact /models/load reply shape. Both replies
+// share this struct; pointer fields plus DisallowUnknownFields make
+// the match strict:
+//
+//	{"success": true}
+//	{"error":{"code":400,"message":"model is already running","type":"invalid_request_error"}}
+type loadResponse struct {
+	Success bool `json:"success"`
+	Error   struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error"`
 }
 
 // classify interprets the load response and logs it accordingly.
-func (l *Loader) classify(m config.Model, root, loadURL string, status int, b []byte) {
-	switch {
-	case status >= 200 && status < 300:
-		l.log.Info("model loaded", "model", m.ID, "url", loadURL)
-	case status == http.StatusBadRequest && strings.Contains(string(b), "already running"):
-		// normal for llama.cpp: the model is already loaded
-		l.log.Info("model already running", "model", m.ID, "url", loadURL)
-	case status == http.StatusNotFound ||
-		status == http.StatusMethodNotAllowed ||
-		status == http.StatusUnauthorized ||
-		status == http.StatusForbidden:
+func (l *Loader) classify(m config.Model, root, loadURL string, status int, b []byte) bool {
+	// Unmarshal once, before the switch: the success and "already
+	// running" branches validate the same struct. Malformed JSON and
+	// unknown fields fail the decode, so reset to zero-valued and let
+	// both fall through to the warn below.
+	var parsed loadResponse
+	err := json.Unmarshal(b, &parsed)
+	if err == nil {
+		switch {
+		case status >= 200 && status < 300 && parsed.Success:
+			l.log.Info("model loaded", "model", m.ID, "url", loadURL)
+			return true
+		case status == http.StatusBadRequest && parsed.Error.Message == "model is already running":
+			// normal for llama.cpp: the model is already loaded
+			l.log.Info("model already running", "model", m.ID, "url", loadURL)
+			return true
+		case status == http.StatusNotFound && parsed.Error.Message == "File Not Found":
+			l.log.Info("model not found", "model", m.ID, "url", loadURL)
+			return false
+		}
+	}
+	switch status {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusUnauthorized, http.StatusForbidden:
 		// no /models/load route (or auth-walled): not llama.cpp,
 		// remember the endpoint and stop trying
-		l.mu.Lock()
 		l.nonLlama[root] = struct{}{}
-		l.mu.Unlock()
 		l.log.Info("endpoint is not llama.cpp, will skip", "model", m.ID, "url", root, "status", status)
-	default:
-		l.log.Warn("models/load unexpected response", "model", m.ID, "url", loadURL,
-			"status", status, "resp", string(b))
+		return false
 	}
+	l.log.Warn("models/load unexpected response", "model", m.ID, "url", loadURL,
+		"status", status, "resp", string(b))
+	return false
 }

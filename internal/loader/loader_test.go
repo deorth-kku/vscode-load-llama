@@ -1,12 +1,14 @@
 package loader
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -54,6 +56,7 @@ func TestLoadCooldownSkips(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n++
 		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success": true}`))
 	}))
 	defer srv.Close()
 
@@ -159,5 +162,83 @@ func TestLoadRespectsProxy(t *testing.T) {
 	}
 	if targetN != 1 {
 		t.Fatalf("expected target to receive the forwarded request, got %d", targetN)
+	}
+}
+
+func TestLoadClassifiesResponsesStrictly(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		wantLog string
+	}{
+		{"success exact", http.StatusOK, `{"success":true}`, "model loaded"},
+		{"success extra field", http.StatusOK, `{"success":true,"foo":1}`, "model loaded"},
+		{"success loose body", http.StatusOK, `{}`, "unexpected response"},
+		{"already running exact", http.StatusBadRequest, `{"error":{"code":400,"message":"model is already running","type":"invalid_request_error"}}`, "model already running"},
+		{"already running wrong message", http.StatusBadRequest, `{"error":{"code":400,"message":"nope","type":"invalid_request_error"}}`, "unexpected response"},
+		{"malformed json", http.StatusOK, `not json`, "unexpected response"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+
+			var buf bytes.Buffer
+			l := New(30*time.Second, slog.New(slog.NewTextHandler(&buf, nil)), nil)
+			l.Load(config.Model{ID: "m1", BaseURL: srv.URL})
+			if !strings.Contains(buf.String(), tc.wantLog) {
+				t.Fatalf("expected %q in log, got: %s", tc.wantLog, buf.String())
+			}
+		})
+	}
+}
+
+// TestLoadCooldownOnlyOnCorrectResponse pins the core invariant: the
+// per-model cooldown is armed ONLY on a strictly-correct reply (success,
+// or the exact "already running" error). Any other reply — loose body,
+// malformed JSON, wrong status, or a genuine llama.cpp "File Not Found" —
+// must NOT arm the cooldown, so a Load issued immediately after still
+// reaches the server.
+func TestLoadCooldownOnlyOnCorrectResponse(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantSecond bool // true => 2nd Load inside the window sends another request
+	}{
+		{"success", http.StatusOK, `{"success":true}`, false},
+		{"already running", http.StatusBadRequest, `{"error":{"code":400,"message":"model is already running","type":"invalid_request_error"}}`, false},
+		{"loose body no success", http.StatusOK, `{}`, true},
+		{"malformed json", http.StatusOK, `not json`, true},
+		{"success but 500", http.StatusInternalServerError, `{"success":true}`, true},
+		{"model not found", http.StatusNotFound, `{"error":{"code":400,"message":"File Not Found","type":"invalid_request_error"}}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var n int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				n++
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+
+			l := New(30*time.Second, discardLog, nil)
+			m := config.Model{ID: "m1", BaseURL: srv.URL}
+			l.Load(m)
+			l.Load(m) // immediately, still inside the 30s cooldown window
+
+			want := 1
+			if tc.wantSecond {
+				want = 2
+			}
+			if n != want {
+				t.Fatalf("expected %d requests, got %d", want, n)
+			}
+		})
 	}
 }

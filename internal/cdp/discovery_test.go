@@ -2,7 +2,7 @@ package cdp
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,7 +86,7 @@ func (m *mockCDPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/json/version":
 		w.Write([]byte(`{"Browser":"mock"}`))
 	case "/json/list":
-		json.NewEncoder(w).Encode(m.tgs)
+		json.MarshalWrite(w, m.tgs)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}

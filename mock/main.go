@@ -11,7 +11,7 @@ package main
 // real input event (MUST trigger exactly one load with the model id).
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"log"

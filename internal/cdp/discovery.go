@@ -2,7 +2,7 @@ package cdp
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"io"
 	"log/slog"
 	"net/http"
@@ -146,7 +146,7 @@ func (d *Discovery) listTargets() ([]Target, error) {
 		Title string `json:"title"`
 		WSURL string `json:"webSocketDebuggerUrl"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+	if err := json.UnmarshalRead(resp.Body, &list); err != nil {
 		return nil, err
 	}
 	var out []Target
